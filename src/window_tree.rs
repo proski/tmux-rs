@@ -1437,7 +1437,7 @@ unsafe fn window_tree_mouse(
         if (*data).left != -1 {
             x -= (*data).left as u32;
         } else {
-            x = x.saturating_sub(1);
+            x = x.strict_sub(1);
         }
         if x == 0 || (*data).end == 0 {
             x = 0;

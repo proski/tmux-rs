@@ -5,7 +5,7 @@ use crate::libc;
 pub unsafe fn strlcat(dst: *mut u8, src: *const u8, size: usize) -> usize {
     unsafe {
         let dst_strlen = libc::strnlen(dst, size);
-        let src_strlen = libc::strnlen(src, size.saturating_sub(dst_strlen).saturating_sub(1));
+        let src_strlen = libc::strnlen(src, size.strict_sub(dst_strlen).strict_sub(1));
 
         core::ptr::copy_nonoverlapping(src, dst.add(dst_strlen), src_strlen);
         *dst.add(dst_strlen + src_strlen) = b'\0';

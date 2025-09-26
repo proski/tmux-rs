@@ -1201,7 +1201,7 @@ unsafe fn status_prompt_replace_complete(c: *mut client, mut s: *const u8) -> i3
         let mut ud: *mut utf8_data;
 
         // Work out where the cursor currently is.
-        let idx = (*c).prompt_index.saturating_sub(1);
+        let idx = (*c).prompt_index.strict_sub(1);
         let mut size = utf8_strlen((*c).prompt_buffer);
 
         // Find the word we are in.

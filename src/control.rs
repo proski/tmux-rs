@@ -698,7 +698,7 @@ pub unsafe fn control_write_pending(c: *mut client, cp: *mut control_pane, limit
             }
 
             cb = tailq_first(&raw mut (*cp).blocks);
-            let age = t.saturating_sub((*cb).t);
+            let age = t.strict_sub((*cb).t);
             log_debug!(
                 "{}: {}: output block {} (age {}) for %%{} (used {}/{})",
                 "control_write_pending",

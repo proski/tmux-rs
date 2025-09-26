@@ -143,7 +143,7 @@ unsafe fn format_draw_put_list(
 
         // The list needs to be trimmed. Try to keep the focus visible.
         let focus_centre: u32 = (focus_start + (focus_end - focus_start) / 2) as u32;
-        let mut start: u32 = focus_centre.saturating_sub(width / 2);
+        let mut start: u32 = focus_centre.strict_sub(width / 2);
         if start + width > (*list).cx {
             start = (*list).cx - width;
         }

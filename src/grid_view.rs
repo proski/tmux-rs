@@ -145,7 +145,7 @@ pub unsafe fn grid_view_insert_lines_region(
         let ny2 = rlower + 1 - py - ny;
         grid_move_lines(gd, rlower + 1 - ny2, py, ny2, bg);
         // TODO does this bug exist upstream?
-        grid_clear(gd, 0, py + ny2, (*gd).sx, ny.saturating_sub(ny2), bg);
+        grid_clear(gd, 0, py + ny2, (*gd).sx, ny.strict_sub(ny2), bg);
     }
 }
 
@@ -157,7 +157,7 @@ pub unsafe fn grid_view_delete_lines(gd: *mut grid, mut py: u32, ny: u32, bg: u3
         let sy = grid_view_y(gd, (*gd).sy);
 
         grid_move_lines(gd, py, py + ny, sy - py - ny, bg);
-        grid_clear(gd, 0, sy.saturating_sub(ny), (*gd).sx, ny, bg);
+        grid_clear(gd, 0, sy.strict_sub(ny), (*gd).sx, ny, bg);
     }
 }
 
@@ -177,7 +177,7 @@ pub unsafe fn grid_view_delete_lines_region(
         let ny2 = rlower + 1 - py - ny;
         grid_move_lines(gd, py, py + ny, ny2, bg);
         // TODO does this bug exist in the tmux source code too
-        grid_clear(gd, 0, py + ny2, (*gd).sx, ny.saturating_sub(ny2), bg);
+        grid_clear(gd, 0, py + ny2, (*gd).sx, ny.strict_sub(ny2), bg);
     }
 }
 

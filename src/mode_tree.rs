@@ -339,7 +339,7 @@ pub unsafe fn mode_tree_set_current(mtd: *mut mode_tree_data, tag: u64) -> bool 
         if let Some(found) = mode_tree_get_tag(&*mtd, tag) {
             (*mtd).current = found as u32;
             // TODO does this same problem exist in upstream?
-            if (*mtd).current > (*mtd).height.saturating_sub(1) {
+            if (*mtd).current > (*mtd).height.strict_sub(1) {
                 (*mtd).offset = (*mtd).current - (*mtd).height + 1;
             } else {
                 (*mtd).offset = 0;
