@@ -766,6 +766,7 @@ pub unsafe fn tty_term_read_list(
                     if s.is_null() || s == (-1i32 as *const u8) {
                         continue;
                     }
+                    log_debug!("PQPQ str {}={}", _s(ent.name.as_ptr()), _s(s));
                 }
                 tty_code_type::Number => {
                     let n = tigetnum(ent.name.as_ptr());
@@ -774,6 +775,7 @@ pub unsafe fn tty_term_read_list(
                     }
                     _ = xsnprintf_!(&raw mut tmp as *mut u8, sizeof_tmp, "{}", n);
                     s = &raw mut tmp as *const u8;
+                    log_debug!("PQPQ num {}={}", _s(ent.name.as_ptr()), _s(s));
                 }
                 tty_code_type::Flag => {
                     let n = tigetflag(ent.name.as_ptr());
@@ -785,6 +787,7 @@ pub unsafe fn tty_term_read_list(
                     } else {
                         s = c!("0");
                     }
+                    log_debug!("PQPQ bool {}={}", _s(ent.name.as_ptr()), n != 0);
                 }
             }
             *caps = xreallocarray((*caps).cast(), (*ncaps) as usize + 1, size_of::<*mut u8>())
