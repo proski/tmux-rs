@@ -121,12 +121,28 @@ fn read_slice<'a>(reader: &mut Cursor<&'a [u8]>, size: usize) -> Result<&'a [u8]
     Ok(&reader.get_ref()[start..end])
 }
 
-fn get_string(string_table: &[u8], offset: usize) -> Result<&[u8], TerminfoError> {
-    let string_length = &string_table[offset..].iter().position(|c| *c == b'\0');
-    let Some(string_length) = string_length else {
-        return Err(TerminfoError::UnterminatedString);
-    };
-    Ok(&string_table[offset..offset + string_length])
+struct StringTable<'a> {
+    table: &'a [u8],
+}
+
+impl<'a> StringTable<'a> {
+    fn new(table: &'a [u8]) -> Self {
+        Self { table }
+    }
+
+    fn get_string(&self, offset: usize) -> Result<&[u8], TerminfoError> {
+        let string_length = &self.table[offset..].iter().position(|c| *c == b'\0');
+        let Some(string_length) = string_length else {
+            return Err(TerminfoError::UnterminatedString);
+        };
+        Ok(&self.table[offset..offset + string_length])
+    }
+
+    fn split_at(&self, offset: usize) -> Self {
+        Self {
+            table: &self.table[offset..],
+        }
+    }
 }
 
 /// Convert ABSENT and CANCELED to None
@@ -198,14 +214,14 @@ pub fn parse<'a>(buffer: &'a [u8]) -> Result<Terminfo<'a>, TerminfoError> {
     let str_offsets = read_slice(&mut reader, std::mem::size_of::<u16>() * str_count)?;
     let mut str_offsets_reader = Cursor::new(str_offsets);
 
-    let str_table = read_slice(&mut reader, str_size)?;
+    let str_table = StringTable::new(read_slice(&mut reader, str_size)?);
 
     for name in STR_NAMES.iter().take(str_count) {
         let offset = read_le16(&mut str_offsets_reader)?;
         let Some(offset) = check_offset(offset) else {
             continue;
         };
-        let value = get_string(str_table, offset)?;
+        let value = str_table.get_string(offset)?;
         strings.insert(*name, value);
     }
 
@@ -231,7 +247,7 @@ pub fn parse<'a>(buffer: &'a [u8]) -> Result<Terminfo<'a>, TerminfoError> {
     let ext_names = read_slice(&mut reader, std::mem::size_of::<u16>() * ext_name_count)?;
     let mut ext_names_reader = Cursor::new(ext_names);
 
-    let ext_str_table = read_slice(&mut reader, ext_str_limit)?;
+    let ext_str_table = StringTable::new(read_slice(&mut reader, ext_str_limit)?);
 
     let mut names_base = 0;
     loop {
@@ -241,11 +257,11 @@ pub fn parse<'a>(buffer: &'a [u8]) -> Result<Terminfo<'a>, TerminfoError> {
         let Some(offset) = check_offset(offset) else {
             continue;
         };
-        let string = get_string(ext_str_table, offset)?;
+        let string = ext_str_table.get_string(offset)?;
         names_base += string.len() + 1;
     }
 
-    let names_table = &ext_str_table[names_base..];
+    let names_table = ext_str_table.split_at(names_base);
 
     loop {
         let Ok(value) = read_u8(&mut ext_bools_reader) else {
@@ -262,7 +278,7 @@ pub fn parse<'a>(buffer: &'a [u8]) -> Result<Terminfo<'a>, TerminfoError> {
         let Some(name_offset) = check_offset(name_offset) else {
             return Err(TerminfoError::UnsupportedFormat);
         };
-        let name = get_string(names_table, name_offset)?;
+        let name = names_table.get_string(name_offset)?;
         booleans.insert(str::from_utf8(name)?, value);
     }
 
@@ -279,7 +295,7 @@ pub fn parse<'a>(buffer: &'a [u8]) -> Result<Terminfo<'a>, TerminfoError> {
         let Some(name_offset) = check_offset(name_offset) else {
             return Err(TerminfoError::UnsupportedFormat);
         };
-        let name = get_string(names_table, name_offset)?;
+        let name = names_table.get_string(name_offset)?;
         numbers.insert(str::from_utf8(name)?, value);
     }
 
@@ -291,7 +307,7 @@ pub fn parse<'a>(buffer: &'a [u8]) -> Result<Terminfo<'a>, TerminfoError> {
         let Some(str_offset) = check_offset(str_offset) else {
             return Err(TerminfoError::UnsupportedFormat);
         };
-        let value = get_string(ext_str_table, str_offset)?;
+        let value = ext_str_table.get_string(str_offset)?;
 
         let Ok(name_offset) = read_le16(&mut ext_names_reader) else {
             return Err(TerminfoError::UnsupportedFormat);
@@ -299,7 +315,7 @@ pub fn parse<'a>(buffer: &'a [u8]) -> Result<Terminfo<'a>, TerminfoError> {
         let Some(name_offset) = check_offset(name_offset) else {
             return Err(TerminfoError::UnsupportedFormat);
         };
-        let name = get_string(names_table, name_offset)?;
+        let name = names_table.get_string(name_offset)?;
         strings.insert(str::from_utf8(name)?, value);
     }
 
