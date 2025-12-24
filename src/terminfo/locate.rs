@@ -1,4 +1,5 @@
 use std::env;
+use std::ffi::OsStr;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -10,27 +11,45 @@ const TERMINFO_DIRS: &[&str] = &[
     "/boot/system/data/terminfo", // haiku
 ];
 
-fn find_in_directory(term_name: &str, dir: &Path) -> Option<PathBuf> {
+/// Errors reported when looking for a terminfo database file
+#[derive(thiserror::Error, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum Error {
+    #[error("InvalidTerminalName")]
+    InvalidTerminalName,
+    #[error("File not found")]
+    FileNotFound,
+}
+
+fn find_in_directory(term_name: &OsStr, dir: &Path) -> Result<PathBuf, Error> {
+    let Some(first_byte) = term_name.as_encoded_bytes().first() else {
+        return Err(Error::InvalidTerminalName);
+    };
+
     // Standard layout - leaf directories use the first character of the terminal name.
-    let first_char = term_name.chars().next()?;
+    let first_char = *first_byte as char;
     let filename = dir.join(first_char.to_string()).join(term_name);
     if filename.exists() {
-        return Some(filename);
+        return Ok(filename);
     }
 
     // Layout for systems with non-case-sensitive filesystems (MacOS, Windows) - leaf
     // directories use the first byte of the terminal name in hexadecimal form.
-    let first_byte = term_name.as_bytes()[0];
-    let first_byte_hex = format!("{first_byte:02x}");
+    let first_byte_hex = format!("{:02x}", *first_byte);
     let filename = dir.join(first_byte_hex).join(term_name);
     if filename.exists() {
-        return Some(filename);
+        return Ok(filename);
     }
 
-    None
+    Err(Error::FileNotFound)
 }
 
-fn search_directories() -> Vec<PathBuf> {
+/// Find all directories to be searched for terminfo files
+///
+/// This function does not attempt to verify if the directories to be searched actually exist.
+///
+/// Returns a vector of directories.
+pub fn search_directories() -> Vec<PathBuf> {
     let mut search_dirs = vec![];
 
     // Lazily evaluated iterator, consumed at most once.
@@ -72,15 +91,17 @@ fn search_directories() -> Vec<PathBuf> {
 ///
 /// * `term_name` - terminal name.
 ///
-/// Returns the file path is found, None if not found.
-pub fn locate(term_name: &str) -> Option<PathBuf> {
+/// Returns the file path if it exist, an error otherwise.
+pub fn locate(term_name: impl AsRef<OsStr>) -> Result<PathBuf, Error> {
     for dir in search_directories() {
-        if let Some(file) = find_in_directory(term_name, &dir) {
-            return Some(file);
+        match find_in_directory(term_name.as_ref(), &dir) {
+            Ok(file) => return Ok(file),
+            Err(Error::FileNotFound) => {}
+            Err(err) => return Err(err),
         }
     }
 
-    None
+    Err(Error::FileNotFound)
 }
 
 #[cfg(test)]
@@ -97,20 +118,20 @@ mod test {
 
     #[test]
     fn empty_name() {
-        assert_eq!(locate(""), None);
+        assert_eq!(locate(""), Err(Error::InvalidTerminalName));
     }
 
     #[test]
     fn missing_file() {
         // Not using TERM_NAME to avoid race conditions - `temp_env::with_vars`
         // is serialized, but we are not using that function here.
-        assert_eq!(locate("no-such-terminal-1"), None);
+        assert_eq!(locate("no-such-terminal-1"), Err(Error::FileNotFound));
     }
 
     #[test]
     fn found_xterm() {
         let found_file = locate("xterm");
-        assert!(found_file.is_some());
+        assert!(found_file.is_ok());
         assert!(exists(found_file.unwrap()).unwrap());
     }
 
@@ -127,7 +148,7 @@ mod test {
         temp_env::with_vars(
             [("TERMINFO_DIRS", Some(terminfo_dirs)), ("TERMINFO", None)],
             || {
-                assert_eq!(locate(TERM_NAME), Some(terminfo_file));
+                assert_eq!(locate(TERM_NAME), Ok(terminfo_file));
             },
         );
     }
@@ -145,7 +166,7 @@ mod test {
         temp_env::with_vars(
             [("TERMINFO_DIRS", Some(terminfo_dirs)), ("TERMINFO", None)],
             || {
-                assert_eq!(locate(TERM_NAME), Some(terminfo_file));
+                assert_eq!(locate(TERM_NAME), Ok(terminfo_file));
             },
         );
     }
@@ -162,7 +183,7 @@ mod test {
         temp_env::with_vars(
             [("TERMINFO_DIRS", None), ("TERMINFO", Some(tempdir))],
             || {
-                assert_eq!(locate(TERM_NAME), Some(terminfo_file));
+                assert_eq!(locate(TERM_NAME), Ok(terminfo_file));
             },
         );
     }
@@ -185,7 +206,7 @@ mod test {
                 ("HOME", Some(tempdir)),
             ],
             || {
-                assert_eq!(locate(TERM_NAME), Some(terminfo_file));
+                assert_eq!(locate(TERM_NAME), Ok(terminfo_file));
             },
         );
     }

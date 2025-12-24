@@ -69,8 +69,9 @@ impl From<&str> for Parameter {
     }
 }
 
-/// Error reported when expanding a string
+/// Errors reported when expanding a string
 #[derive(thiserror::Error, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum Error {
     #[error("Not enough stack elements for operator {0}")]
     StackUnderflow(char),
@@ -559,6 +560,12 @@ fn format(val: Parameter, op: char, flags: Flags) -> Result<Vec<u8>, Error> {
         }
     }
     Ok(s)
+}
+
+impl Default for ExpandContext {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]

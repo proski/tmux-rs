@@ -34,6 +34,8 @@ pub(crate) use crate::libc::{free_, memcpy_, memcpy__, streq_};
 mod event_;
 use crate::event_::*;
 
+pub mod terminfo;
+
 macro_rules! cfg_pub_mods {
     ($( mod $mod_name:ident; )*) => {
         $(
@@ -98,7 +100,6 @@ cfg_pub_mods! {
     mod spawn;
     mod status;
     mod style_;
-    mod terminfo;
     mod tmux;
     mod tmux_protocol;
     mod tty_;

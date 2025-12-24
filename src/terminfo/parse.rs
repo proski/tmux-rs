@@ -1,7 +1,9 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::io::Cursor;
 use std::io::Read;
 use std::io::Seek;
+use std::io::SeekFrom;
 
 const ABSENT_ENTRY: i32 = -1;
 const CANCELED_ENTRY: i32 = -2;
@@ -67,10 +69,13 @@ enum TerminfoMagic {
     Magic2 = 0x021e,
 }
 
-/// Errors detected when parsing terminfo database
+/// Errors reported when parsing a terminfo database
 #[derive(thiserror::Error, Debug)]
-pub enum TerminfoError {
-    #[error("String without terminating NUL")]
+#[non_exhaustive]
+pub enum Error {
+    #[error("Unknown magic number")]
+    BadMagic,
+    #[error("String without final NUL")]
     UnterminatedString,
     #[error("Unsupported terminfo format")]
     UnsupportedFormat,
@@ -80,37 +85,38 @@ pub enum TerminfoError {
     Utf8(#[from] std::str::Utf8Error),
 }
 
-fn read_boolean(reader: &mut impl Read) -> Result<Option<bool>, TerminfoError> {
+fn read_u8(reader: &mut impl Read) -> Result<u8, Error> {
     let mut buffer = [0u8; 1];
     reader.read_exact(&mut buffer)?;
-    let value = match buffer[0] {
-        0 => Some(false),
-        1 => Some(true),
-        _ => None,
-    };
-    Ok(value)
+    Ok(buffer[0])
 }
 
-fn read_le16(reader: &mut impl Read) -> Result<u16, TerminfoError> {
+fn read_le16(reader: &mut impl Read) -> Result<u16, Error> {
     let mut buffer = [0u8; 2];
     reader.read_exact(&mut buffer)?;
     let value = u16::from_le_bytes(buffer);
     Ok(value)
 }
 
-fn read_slice<'a>(reader: &mut Cursor<&'a [u8]>, size: usize) -> Result<&'a [u8], TerminfoError> {
+fn read_slice<'a>(reader: &mut Cursor<&'a [u8]>, size: usize) -> Result<&'a [u8], Error> {
     let start = reader.position() as usize;
-    let end = start + size;
-    reader.seek_relative(size as i64)?;
-    Ok(&reader.get_ref()[start..end])
+    let end = reader.seek(SeekFrom::Current(size as i64))? as usize;
+    let buffer = &reader.get_ref();
+    match buffer.get(start..end) {
+        Some(slice) => Ok(slice),
+        None => Err(Error::UnsupportedFormat),
+    }
 }
 
-fn get_string(string_table: &[u8], offset: usize) -> Result<&[u8], TerminfoError> {
-    let string_length = &string_table[offset..].iter().position(|c| *c == b'\0');
-    let Some(string_length) = string_length else {
-        return Err(TerminfoError::UnterminatedString);
+fn get_string(string_table: &[u8], offset: usize) -> Result<&[u8], Error> {
+    let Some(string_slice) = string_table.get(offset..) else {
+        return Err(Error::UnsupportedFormat);
     };
-    Ok(&string_table[offset..offset + string_length])
+    if let Some(string_length) = &string_slice.iter().position(|c| *c == b'\0') {
+        Ok(&string_table[offset..offset + string_length])
+    } else {
+        Err(Error::UnterminatedString)
+    }
 }
 
 /// Convert ABSENT and CANCELED to None
@@ -123,7 +129,7 @@ fn check_offset(size: u16) -> Option<usize> {
 }
 
 /// Skip a byte if needed to ensure 2-byte alignment
-fn align_cursor(reader: &mut Cursor<&[u8]>) -> Result<(), TerminfoError> {
+fn align_cursor(reader: &mut Cursor<&[u8]>) -> Result<(), Error> {
     let position = reader.position();
     if position & 1 == 1 {
         reader.seek_relative(1)?;
@@ -132,37 +138,38 @@ fn align_cursor(reader: &mut Cursor<&[u8]>) -> Result<(), TerminfoError> {
 }
 
 /// Parsed terminfo entry
+#[derive(Debug)]
 pub struct Terminfo<'a> {
-    pub booleans: HashMap<&'a str, bool>,
-    pub numbers: HashMap<&'a str, i32>,
-    pub strings: HashMap<&'a str, &'a [u8]>,
+    pub booleans: BTreeSet<&'a str>,
+    pub numbers: BTreeMap<&'a str, i32>,
+    pub strings: BTreeMap<&'a str, &'a [u8]>,
     number_size: usize,
 }
 
 impl<'a> Terminfo<'a> {
     fn new() -> Self {
         Self {
-            booleans: HashMap::default(),
-            numbers: HashMap::default(),
-            strings: HashMap::default(),
-            number_size: 2,
+            booleans: BTreeSet::default(),
+            numbers: BTreeMap::default(),
+            strings: BTreeMap::default(),
+            number_size: 0,
         }
     }
 
     /// Parse terminfo database from the supplied buffer
-    pub fn parse(buffer: &'a [u8]) -> Result<Self, TerminfoError> {
+    pub fn parse(buffer: &'a [u8]) -> Result<Self, Error> {
         let mut terminfo = Self::new();
         let mut reader = Cursor::new(buffer);
         terminfo.parse_base(&mut reader)?;
         match terminfo.parse_extended(&mut reader) {
             Ok(()) => {}
-            Err(TerminfoError::IO(_)) => {} // missing extended data is OK
+            Err(Error::IO(_)) => {} // missing extended data is OK
             Err(err) => return Err(err),
         }
         Ok(terminfo)
     }
 
-    fn read_number(&self, reader: &mut Cursor<&'a [u8]>) -> Result<Option<i32>, TerminfoError> {
+    fn read_number(&self, reader: &mut Cursor<&'a [u8]>) -> Result<Option<i32>, Error> {
         let value = if self.number_size == 4 {
             let mut buffer = [0u8; 4];
             reader.read_exact(&mut buffer)?;
@@ -176,7 +183,7 @@ impl<'a> Terminfo<'a> {
     }
 
     /// Parse base capabilities
-    fn parse_base(&mut self, mut reader: &mut Cursor<&'a [u8]>) -> Result<(), TerminfoError> {
+    fn parse_base(&mut self, mut reader: &mut Cursor<&'a [u8]>) -> Result<(), Error> {
         let magic = read_le16(&mut reader)?;
         let name_size = usize::from(read_le16(&mut reader)?);
         let bool_count = usize::from(read_le16(&mut reader)?);
@@ -187,24 +194,28 @@ impl<'a> Terminfo<'a> {
         self.number_size = match TerminfoMagic::try_from(magic) {
             Ok(TerminfoMagic::Magic1) => 2,
             Ok(TerminfoMagic::Magic2) => 4,
-            Err(_) => return Err(TerminfoError::UnsupportedFormat),
+            Err(_) => return Err(Error::BadMagic),
         };
 
         if bool_count > BOOL_NAMES.len()
             || num_count > NUM_NAMES.len()
             || str_count > STR_NAMES.len()
         {
-            return Err(TerminfoError::UnsupportedFormat);
+            return Err(Error::UnsupportedFormat);
         }
 
         // Skip terminal names/aliases, we are not using them
         reader.seek_relative(name_size as i64)?;
 
         for name in BOOL_NAMES.iter().take(bool_count) {
-            let value = read_boolean(&mut reader)?;
-            if value == Some(true) {
-                self.booleans.insert(*name, true);
-            }
+            let value = read_u8(&mut reader)?;
+            match value {
+                0 => {}
+                1 => {
+                    self.booleans.insert(*name);
+                }
+                _ => return Err(Error::UnsupportedFormat),
+            };
         }
 
         align_cursor(reader)?;
@@ -233,98 +244,370 @@ impl<'a> Terminfo<'a> {
     }
 
     /// Parse extended capabilities
-    fn parse_extended(&mut self, mut reader: &mut Cursor<&'a [u8]>) -> Result<(), TerminfoError> {
+    fn parse_extended(&mut self, mut reader: &mut Cursor<&'a [u8]>) -> Result<(), Error> {
         align_cursor(reader)?;
 
-        let ext_bool_count = usize::from(read_le16(&mut reader)?);
-        let ext_num_count = usize::from(read_le16(&mut reader)?);
-        let ext_str_count = usize::from(read_le16(&mut reader)?);
+        let bool_count = usize::from(read_le16(&mut reader)?);
+        let num_count = usize::from(read_le16(&mut reader)?);
+        let str_count = usize::from(read_le16(&mut reader)?);
         let _ext_str_usage = usize::from(read_le16(&mut reader)?);
-        let ext_str_limit = usize::from(read_le16(&mut reader)?);
+        let str_limit = usize::from(read_le16(&mut reader)?);
 
-        let ext_bools = read_slice(reader, ext_bool_count)?;
-        let mut ext_bools_reader = Cursor::new(ext_bools);
+        let bools = read_slice(reader, bool_count)?;
+        let mut bools_reader = Cursor::new(bools);
         align_cursor(reader)?;
 
-        let ext_nums = read_slice(reader, self.number_size * ext_num_count)?;
-        let mut ext_nums_reader = Cursor::new(ext_nums);
+        let nums = read_slice(reader, self.number_size * num_count)?;
+        let mut nums_reader = Cursor::new(nums);
 
-        let ext_strs = read_slice(reader, std::mem::size_of::<u16>() * ext_str_count)?;
-        let mut ext_strs_reader = Cursor::new(ext_strs);
+        let strs = read_slice(reader, std::mem::size_of::<u16>() * str_count)?;
+        let mut strs_reader = Cursor::new(strs);
 
-        let ext_name_count = ext_bool_count + ext_num_count + ext_str_count;
-        let ext_names = read_slice(reader, std::mem::size_of::<u16>() * ext_name_count)?;
-        let mut ext_names_reader = Cursor::new(ext_names);
+        let name_count = bool_count + num_count + str_count;
+        let names = read_slice(reader, std::mem::size_of::<u16>() * name_count)?;
+        let mut names_reader = Cursor::new(names);
 
-        let ext_str_table = read_slice(reader, ext_str_limit)?;
+        let str_table = read_slice(reader, str_limit)?;
 
         let mut names_base = 0;
         loop {
-            let Ok(offset) = read_le16(&mut ext_strs_reader) else {
+            let Ok(offset) = read_le16(&mut strs_reader) else {
                 break;
             };
             let Some(offset) = check_offset(offset) else {
                 continue;
             };
-            names_base += get_string(ext_str_table, offset)?.len() + 1;
+            names_base += get_string(str_table, offset)?.len() + 1;
         }
 
-        let names_table = &ext_str_table[names_base..];
+        let Some(names_table) = &str_table.get(names_base..) else {
+            return Err(Error::UnsupportedFormat);
+        };
 
         loop {
-            let Ok(value) = read_boolean(&mut ext_bools_reader) else {
+            let Ok(value) = read_u8(&mut bools_reader) else {
                 break;
             };
-            let Some(value) = value else {
-                return Err(TerminfoError::UnsupportedFormat);
+            if value != 1 {
+                return Err(Error::UnsupportedFormat);
             };
-            let Ok(name_offset) = read_le16(&mut ext_names_reader) else {
-                return Err(TerminfoError::UnsupportedFormat);
+            let Ok(name_offset) = read_le16(&mut names_reader) else {
+                return Err(Error::UnsupportedFormat);
             };
             let Some(name_offset) = check_offset(name_offset) else {
-                return Err(TerminfoError::UnsupportedFormat);
+                return Err(Error::UnsupportedFormat);
             };
             let name = get_string(names_table, name_offset)?;
-            self.booleans.insert(str::from_utf8(name)?, value);
+            self.booleans.insert(str::from_utf8(name)?);
         }
 
         loop {
-            let Ok(value) = self.read_number(&mut ext_nums_reader) else {
+            let Ok(value) = self.read_number(&mut nums_reader) else {
                 break;
             };
             let Some(value) = value else {
-                return Err(TerminfoError::UnsupportedFormat);
+                return Err(Error::UnsupportedFormat);
             };
-            let Ok(name_offset) = read_le16(&mut ext_names_reader) else {
-                return Err(TerminfoError::UnsupportedFormat);
+            let Ok(name_offset) = read_le16(&mut names_reader) else {
+                return Err(Error::UnsupportedFormat);
             };
             let Some(name_offset) = check_offset(name_offset) else {
-                return Err(TerminfoError::UnsupportedFormat);
+                return Err(Error::UnsupportedFormat);
             };
             let name = get_string(names_table, name_offset)?;
             self.numbers.insert(str::from_utf8(name)?, value);
         }
 
-        ext_strs_reader.set_position(0);
+        strs_reader.set_position(0);
         loop {
-            let Ok(str_offset) = read_le16(&mut ext_strs_reader) else {
+            let Ok(str_offset) = read_le16(&mut strs_reader) else {
                 break;
             };
-            let Some(str_offset) = check_offset(str_offset) else {
-                return Err(TerminfoError::UnsupportedFormat);
+            let Ok(name_offset) = read_le16(&mut names_reader) else {
+                return Err(Error::UnsupportedFormat);
             };
-            let value = get_string(ext_str_table, str_offset)?;
-
-            let Ok(name_offset) = read_le16(&mut ext_names_reader) else {
-                return Err(TerminfoError::UnsupportedFormat);
-            };
-            let Some(name_offset) = check_offset(name_offset) else {
-                return Err(TerminfoError::UnsupportedFormat);
-            };
-            let name = get_string(names_table, name_offset)?;
-            self.strings.insert(str::from_utf8(name)?, value);
+            if let (Some(str_offset), Some(name_offset)) =
+                (check_offset(str_offset), check_offset(name_offset))
+            {
+                let value = get_string(str_table, str_offset)?;
+                let name = get_string(names_table, name_offset)?;
+                self.strings.insert(str::from_utf8(name)?, value);
+            }
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[repr(i32)]
+    enum NumberType {
+        U16 = 2,
+        U32 = 4,
+    }
+
+    fn make_buffer(number_type: NumberType, add_ext: bool) -> Vec<u8> {
+        let (magic, numbers) = match number_type {
+            NumberType::U16 => (0x011a, &[80, 0xFFFE, 25, 0xFFFF, 0x8000, 82]),
+            NumberType::U32 => (
+                0x021e,
+                &[120, 0xFFFFFFFE, 42, 0xFFFFFFFF, 0x80000000, 82000],
+            ),
+        };
+        let term_name = b"myterm";
+        let booleans = &[1, 0, 0, 0, 1];
+        let strings: &[Option<&[u8]>] = &[None, Some(b"Hello"), None, None, Some(b"World!")];
+        let str_size = strings.iter().flatten().map(|x| x.len() as u16 + 1).sum();
+
+        let mut buffer = vec![];
+        buffer.extend_from_slice(&u16::to_le_bytes(magic));
+        buffer.extend_from_slice(&u16::to_le_bytes(term_name.len() as u16 + 1));
+        buffer.extend_from_slice(&u16::to_le_bytes(booleans.len() as u16));
+        buffer.extend_from_slice(&u16::to_le_bytes(numbers.len() as u16));
+        buffer.extend_from_slice(&u16::to_le_bytes(strings.len() as u16));
+        buffer.extend_from_slice(&u16::to_le_bytes(str_size));
+        buffer.extend_from_slice(term_name);
+        buffer.push(0);
+        buffer.extend_from_slice(booleans);
+        if !buffer.len().is_multiple_of(2) {
+            buffer.push(0);
+        }
+        for number in numbers {
+            match number_type {
+                NumberType::U16 => buffer.extend_from_slice(&u16::to_le_bytes(*number as u16)),
+                NumberType::U32 => buffer.extend_from_slice(&u32::to_le_bytes(*number)),
+            }
+        }
+        let mut offset = 0;
+        for string in strings {
+            if let Some(string) = string {
+                buffer.extend_from_slice(&u16::to_le_bytes(offset));
+                offset += string.len() as u16 + 1;
+            } else {
+                buffer.extend_from_slice(&u16::to_le_bytes(0xFFFF));
+            }
+        }
+        for string in strings.iter().flatten() {
+            buffer.extend_from_slice(string);
+            buffer.push(0);
+        }
+        if add_ext {
+            if !buffer.len().is_multiple_of(2) {
+                buffer.push(0);
+            }
+            buffer.append(&mut make_ext_buffer(number_type));
+        }
+        buffer
+    }
+
+    fn make_ext_buffer(number_type: NumberType) -> Vec<u8> {
+        let booleans: &[&[u8]] = &[b"Curly", b"Italic", b"Semi-bold"];
+        let numbers: &[(&[u8], u32)] = &[(b"Shades", 1100), (b"Variants", 2200)];
+        let strings: &[(&[u8], Option<&[u8]>)] = &[
+            (b"Colors", Some(b"A lot")),
+            (b"Luminocity", Some(b"Positive")),
+            (b"Ideas", None),
+        ];
+
+        let boolean_name_size: u16 = booleans.iter().map(|x| x.len() as u16 + 1).sum();
+        let number_name_size: u16 = numbers.iter().map(|x| x.0.len() as u16 + 1).sum();
+        let string_name_size: u16 = strings.iter().map(|x| x.0.len() as u16 + 1).sum();
+        let string_value_size: u16 = strings
+            .iter()
+            .filter_map(|x| x.1)
+            .map(|x| x.len() as u16 + 1)
+            .sum();
+        let name_size = boolean_name_size + number_name_size + string_name_size;
+        let string_size = name_size + string_value_size;
+
+        let mut buffer = vec![];
+        buffer.extend_from_slice(&u16::to_le_bytes(booleans.len() as u16));
+        buffer.extend_from_slice(&u16::to_le_bytes(numbers.len() as u16));
+        buffer.extend_from_slice(&u16::to_le_bytes(strings.len() as u16));
+        buffer.extend_from_slice(&u16::to_le_bytes(0u16)); // unused `ext_str_usage`
+        buffer.extend_from_slice(&u16::to_le_bytes(string_size));
+
+        // boolean values, align(2), number values, string value offsets
+        // name offsets, string value table, boolean names, number names, string names
+
+        for _boolean in booleans {
+            buffer.push(1);
+        }
+        if !buffer.len().is_multiple_of(2) {
+            buffer.push(0);
+        }
+        for number in numbers {
+            match number_type {
+                NumberType::U16 => buffer.extend_from_slice(&u16::to_le_bytes(number.1 as u16)),
+                NumberType::U32 => buffer.extend_from_slice(&u32::to_le_bytes(number.1)),
+            }
+        }
+        let mut offset = 0;
+        for string in strings {
+            if let Some(string) = string.1 {
+                buffer.extend_from_slice(&u16::to_le_bytes(offset));
+                offset += string.len() as u16 + 1;
+            } else {
+                buffer.extend_from_slice(&u16::to_le_bytes(0xFFFF));
+            }
+        }
+
+        offset = 0;
+        for boolean in booleans {
+            buffer.extend_from_slice(&u16::to_le_bytes(offset));
+            offset += boolean.len() as u16 + 1;
+        }
+        for number in numbers {
+            buffer.extend_from_slice(&u16::to_le_bytes(offset));
+            offset += number.0.len() as u16 + 1;
+        }
+        for string in strings {
+            buffer.extend_from_slice(&u16::to_le_bytes(offset));
+            offset += string.0.len() as u16 + 1;
+        }
+
+        for string in strings {
+            if let Some(string) = string.1 {
+                buffer.extend_from_slice(string);
+                buffer.push(0);
+            }
+        }
+
+        for boolean in booleans {
+            buffer.extend_from_slice(boolean);
+            buffer.push(0);
+        }
+        for number in numbers {
+            buffer.extend_from_slice(number.0);
+            buffer.push(0);
+        }
+        for string in strings {
+            buffer.extend_from_slice(string.0);
+            buffer.push(0);
+        }
+
+        buffer
+    }
+
+    #[test]
+    fn empty_buffer() {
+        let terminfo = Terminfo::parse(b"");
+        assert!(matches!(terminfo.unwrap_err(), Error::IO(_)));
+    }
+
+    #[test]
+    fn base_16_bit() {
+        let buffer = make_buffer(NumberType::U16, false);
+        let terminfo = Terminfo::parse(buffer.as_slice()).unwrap();
+        assert!(terminfo.booleans.into_iter().eq(vec!["bw", "xenl"]));
+        assert!(
+            terminfo
+                .numbers
+                .into_iter()
+                .eq(vec![("cols", 80), ("lines", 25), ("pb", 82)])
+        );
+        assert!(terminfo.strings.into_iter().eq(vec![
+            ("bel", b"Hello".as_slice()),
+            ("tbc", b"World!".as_slice())
+        ]));
+    }
+
+    #[test]
+    fn base_32_bit() {
+        let buffer = make_buffer(NumberType::U32, false);
+        let terminfo = Terminfo::parse(buffer.as_slice()).unwrap();
+        assert!(terminfo.booleans.into_iter().eq(vec!["bw", "xenl"]));
+        assert!(
+            terminfo
+                .numbers
+                .into_iter()
+                .eq(vec![("cols", 120), ("lines", 42), ("pb", 82000)])
+        );
+        assert!(terminfo.strings.into_iter().eq(vec![
+            ("bel", b"Hello".as_slice()),
+            ("tbc", b"World!".as_slice())
+        ]));
+    }
+
+    #[test]
+    fn bad_magic() {
+        let mut buffer = make_buffer(NumberType::U16, false);
+        buffer[1] = 3;
+        let terminfo = Terminfo::parse(buffer.as_slice());
+        assert!(matches!(terminfo.unwrap_err(), Error::BadMagic));
+    }
+
+    #[test]
+    fn base_truncated() {
+        let mut buffer = make_buffer(NumberType::U16, false);
+        buffer.pop();
+        let terminfo = Terminfo::parse(buffer.as_slice());
+        assert!(matches!(terminfo.unwrap_err(), Error::UnsupportedFormat));
+    }
+
+    #[test]
+    fn base_unterminated_string() {
+        let mut buffer = make_buffer(NumberType::U16, false);
+        let buffer_size = buffer.len();
+        buffer[buffer_size - 1] = b'!';
+        let terminfo = Terminfo::parse(buffer.as_slice());
+        assert!(matches!(terminfo.unwrap_err(), Error::UnterminatedString));
+    }
+
+    #[test]
+    fn extended_16_bit() {
+        let buffer = make_buffer(NumberType::U16, true);
+        let terminfo = Terminfo::parse(buffer.as_slice()).unwrap();
+        println!("{terminfo:?}");
+        assert!(terminfo.booleans.into_iter().eq(vec![
+            "Curly",
+            "Italic",
+            "Semi-bold",
+            "bw",
+            "xenl"
+        ]));
+        assert!(terminfo.numbers.into_iter().eq(vec![
+            ("Shades", 1100),
+            ("Variants", 2200),
+            ("cols", 80),
+            ("lines", 25),
+            ("pb", 82)
+        ]));
+        assert!(terminfo.strings.into_iter().eq(vec![
+            ("Colors", b"A lot".as_slice()),
+            ("Luminocity", b"Positive".as_slice()),
+            ("bel", b"Hello".as_slice()),
+            ("tbc", b"World!".as_slice())
+        ]));
+    }
+
+    #[test]
+    fn extended_32_bit() {
+        let buffer = make_buffer(NumberType::U32, true);
+        let terminfo = Terminfo::parse(buffer.as_slice()).unwrap();
+        println!("{terminfo:?}");
+        assert!(terminfo.booleans.into_iter().eq(vec![
+            "Curly",
+            "Italic",
+            "Semi-bold",
+            "bw",
+            "xenl"
+        ]));
+        assert!(terminfo.numbers.into_iter().eq(vec![
+            ("Shades", 1100),
+            ("Variants", 2200),
+            ("cols", 120),
+            ("lines", 42),
+            ("pb", 82000)
+        ]));
+        assert!(terminfo.strings.into_iter().eq(vec![
+            ("Colors", b"A lot".as_slice()),
+            ("Luminocity", b"Positive".as_slice()),
+            ("bel", b"Hello".as_slice()),
+            ("tbc", b"World!".as_slice())
+        ]));
     }
 }

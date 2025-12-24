@@ -739,7 +739,7 @@ pub unsafe fn tty_term_read_list(
     unsafe {
         let mut tmp = [0u8; 11];
 
-        let Some(terminfo_path) = terminfo::locate(cstr_to_str(name)) else {
+        let Ok(terminfo_path) = terminfo::locate(cstr_to_str(name)) else {
             *cause = format_nul!("can't find terminfo database for terminal: {}", _s(name));
             return -1;
         };
@@ -777,7 +777,7 @@ pub unsafe fn tty_term_read_list(
                     &raw mut tmp as *const u8
                 }
                 tty_code_type::Flag => {
-                    let Some(true) = terminfo.booleans.get(cstr_to_str(ent.name.as_ptr())) else {
+                    if !terminfo.booleans.contains(cstr_to_str(ent.name.as_ptr())) {
                         continue;
                     };
                     c!("1")
